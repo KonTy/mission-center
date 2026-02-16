@@ -484,3 +484,164 @@ fn primary_processes(app: &App, process_map: &HashMap<u32, Process>) -> HashSet<
 
     primary_processes
 }
+
+pub fn update_apps_flat(
+    app_map: &HashMap<String, App>,
+    process_map: &HashMap<u32, Process>,
+    app_icons: &mut HashMap<u32, LightCachedIcon>,
+    list: &gio::ListStore,
+    root_pid: u32,
+) {
+    app_icons.clear();
+
+    let mut pid_to_app: HashMap<u32, &App> = HashMap::new();
+    for (_, app) in app_map.iter() {
+        for &pid in &app.pids {
+            pid_to_app.insert(pid, app);
+        }
+    }
+
+    let mut app_entries: HashMap<&str, ProcessUsageStats> = HashMap::new();
+    for (_, app) in app_map.iter() {
+        let mut stats = ProcessUsageStats::default();
+        for pid in primary_processes(app, process_map) {
+            if let Some(process) = process_map.get(&pid) {
+                stats.merge(&process.merged_usage_stats(process_map));
+            }
+        }
+        app_entries.insert(&app.id, stats);
+    }
+
+    let orphan_pids: HashSet<u32> = process_map
+        .keys()
+        .copied()
+        .filter(|pid| *pid != root_pid && !pid_to_app.contains_key(pid))
+        .collect();
+
+    let mut has_died = HashSet::new();
+    let mut does_exist_apps = HashSet::new();
+    let mut does_exist_orphans = HashSet::new();
+
+    list.iter::<RowModel>().flatten().for_each(|row_model| {
+        let id = row_model.id().to_string();
+        if id.starts_with("flat-app-") {
+            let app_id = &id["flat-app-".len()..];
+            if let Some(stats) = app_entries.get(app_id) {
+                set_stats(&row_model, stats);
+                if let Some(app) = app_map.get(app_id) {
+                    row_model
+                        .imp()
+                        .set_light_icon(LightCachedIcon::AppCachedKey(app.id.clone(), 24));
+                    for &pid in &app.pids {
+                        app_icons.insert(pid, LightCachedIcon::AppCachedKey(app.id.clone(), 16));
+                    }
+                }
+                row_model.children().remove_all();
+                does_exist_apps.insert(app_id.to_string());
+            } else {
+                has_died.insert(id);
+            }
+        } else if id.starts_with("flat-") {
+            let pid_str = &id["flat-".len()..];
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                if orphan_pids.contains(&pid) {
+                    if let Some(process) = process_map.get(&pid) {
+                        set_stats(&row_model, &process.usage_stats);
+                        row_model.children().remove_all();
+                    }
+                    does_exist_orphans.insert(pid);
+                } else {
+                    has_died.insert(id);
+                }
+            } else {
+                has_died.insert(id);
+            }
+        } else {
+            has_died.insert(id);
+        }
+    });
+
+    list.retain(|object| {
+        object
+            .downcast_ref::<RowModel>()
+            .map(|rm| !has_died.contains(&rm.id().to_string()))
+            .unwrap_or(false)
+    });
+
+    for (_, app) in app_map.iter() {
+        if does_exist_apps.contains(app.id.as_str()) {
+            continue;
+        }
+        let stats = match app_entries.get(app.id.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let row_model = RowModelBuilder::new()
+            .content_type(ContentType::App)
+            .section_type(SectionType::FirstSection)
+            .light_cached_icon(LightCachedIcon::AppCachedKey(app.id.clone(), 24))
+            .id(&format!("flat-app-{}", app.id))
+            .name(&app.name)
+            .build();
+        list.append(&row_model);
+        set_stats(&row_model, stats);
+        for &pid in &app.pids {
+            app_icons.insert(pid, LightCachedIcon::AppCachedKey(app.id.clone(), 16));
+        }
+    }
+
+    for &pid in orphan_pids.iter().filter(|pid| !does_exist_orphans.contains(pid)) {
+        let process = match process_map.get(&pid) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let pretty_name = if process.exe.is_empty() {
+            if let Some(cmd) = process.cmd.first() {
+                let mut cmd = cmd
+                    .split_ascii_whitespace()
+                    .next()
+                    .and_then(|s| s.split('/').last())
+                    .unwrap_or(&process.name);
+                if let Some(s) = cmd.strip_suffix(':') {
+                    cmd = s;
+                }
+                cmd.trim()
+            } else {
+                process.name.trim()
+            }
+        } else {
+            let exe_name = process.exe.split('/').last().unwrap_or(&process.name);
+            if exe_name.starts_with("wine") {
+                if process.cmd.is_empty() {
+                    process.name.trim()
+                } else {
+                    process.cmd[0]
+                        .split("\\")
+                        .last()
+                        .unwrap_or(&process.name)
+                        .split("/")
+                        .last()
+                        .unwrap_or(&process.name)
+                        .trim()
+                }
+            } else {
+                exe_name.trim()
+            }
+        };
+
+        let command_line = process.cmd.join(" ");
+
+        let row_model = RowModelBuilder::new()
+            .content_type(ContentType::App)
+            .section_type(SectionType::FirstSection)
+            .id(&format!("flat-{}", pid))
+            .pid(pid)
+            .name(pretty_name)
+            .command_line(&command_line)
+            .build();
+        list.append(&row_model);
+        set_stats(&row_model, &process.usage_stats);
+    }
+}
