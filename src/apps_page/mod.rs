@@ -28,10 +28,11 @@ use arrayvec::ArrayString;
 use gtk::{gio, glib, subclass::prelude::*};
 
 use crate::i18n::{i18n, ni18n_f};
+use crate::settings;
 use crate::magpie_client::App;
 use crate::table_view::cached_icon::LightCachedIcon;
 use crate::table_view::{
-    update_apps, update_processes, ContentType, ProcessActionBar, RowModel, RowModelBuilder,
+    update_apps, update_apps_flat, update_processes, ContentType, ProcessActionBar, RowModel, RowModelBuilder,
     SectionType, SettingsNamespace, TableView,
 };
 
@@ -286,30 +287,47 @@ impl AppsPage {
 
         imp.table_view.imp().update_column_titles(readings);
 
-        let mut process_model_map = HashMap::new();
         let root_process = readings.running_processes.keys().min().unwrap_or(&1);
-        if let Some(init) = readings.running_processes.get(root_process) {
-            update_processes(
-                &readings.running_processes,
-                init.children.clone().drain(..).collect(),
-                &imp.processes_section.children(),
-                &imp.app_icons.borrow(),
-                &Default::default(),
-                imp.table_view.imp().use_merged_stats.get(),
-                SectionType::SecondSection,
-                None,
-                &mut process_model_map,
-            );
-        }
         imp.root_process.set(*root_process);
 
-        update_apps(
-            &readings.running_apps,
-            &readings.running_processes,
-            &process_model_map,
-            &mut imp.app_icons.borrow_mut(),
-            &imp.apps_section.children(),
-        );
+        let flat_mode = settings!().boolean("apps-page-flat-process-list");
+        if flat_mode {
+            imp.apps_section.set_name("");
+            imp.processes_section.set_name("");
+            imp.processes_section.children().remove_all();
+            update_apps_flat(
+                &readings.running_apps,
+                &readings.running_processes,
+                &mut imp.app_icons.borrow_mut(),
+                &imp.apps_section.children(),
+                *root_process,
+            );
+        } else {
+            imp.apps_section.set_name(i18n("Apps").as_str());
+            imp.processes_section.set_name(i18n("Processes").as_str());
+            let mut process_model_map = HashMap::new();
+            if let Some(init) = readings.running_processes.get(root_process) {
+                update_processes(
+                    &readings.running_processes,
+                    init.children.clone().drain(..).collect(),
+                    &imp.processes_section.children(),
+                    &imp.app_icons.borrow(),
+                    &Default::default(),
+                    imp.table_view.imp().use_merged_stats.get(),
+                    SectionType::SecondSection,
+                    None,
+                    &mut process_model_map,
+                );
+            }
+
+            update_apps(
+                &readings.running_apps,
+                &readings.running_processes,
+                &process_model_map,
+                &mut imp.app_icons.borrow_mut(),
+                &imp.apps_section.children(),
+            );
+        }
 
         let _ = std::mem::replace(
             &mut *imp.running_apps.borrow_mut(),
