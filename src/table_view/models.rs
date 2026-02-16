@@ -523,48 +523,55 @@ pub fn update_apps_flat(
     let mut does_exist_orphans = HashSet::new();
 
     list.iter::<RowModel>().flatten().for_each(|row_model| {
+        if !row_model.is_flat() {
+            has_died.insert(row_model.id().to_string());
+            return;
+        }
+
         let id = row_model.id().to_string();
-        if id.starts_with("flat-app-") {
-            let app_id = &id["flat-app-".len()..];
-            if let Some(stats) = app_entries.get(app_id) {
-                set_stats(&row_model, stats);
-                if let Some(app) = app_map.get(app_id) {
-                    row_model
-                        .imp()
-                        .set_light_icon(LightCachedIcon::AppCachedKey(app.id.clone(), 24));
-                    for &pid in &app.pids {
-                        app_icons.insert(pid, LightCachedIcon::AppCachedKey(app.id.clone(), 16));
+        match row_model.content_type() {
+            ContentType::App => {
+                if let Some(stats) = app_entries.get(id.as_str()) {
+                    set_stats(&row_model, stats);
+                    if let Some(app) = app_map.get(id.as_str()) {
+                        row_model
+                            .imp()
+                            .set_light_icon(LightCachedIcon::AppCachedKey(app.id.clone(), 24));
+                        for &pid in &app.pids {
+                            app_icons.insert(pid, LightCachedIcon::AppCachedKey(app.id.clone(), 16));
+                        }
                     }
-                }
-                row_model.children().remove_all();
-                does_exist_apps.insert(app_id.to_string());
-            } else {
-                has_died.insert(id);
-            }
-        } else if id.starts_with("flat-") {
-            let pid_str = &id["flat-".len()..];
-            if let Ok(pid) = pid_str.parse::<u32>() {
-                if orphan_pids.contains(&pid) {
-                    if let Some(process) = process_map.get(&pid) {
-                        set_stats(&row_model, &process.usage_stats);
-                        row_model.children().remove_all();
-                    }
-                    does_exist_orphans.insert(pid);
+                    row_model.children().remove_all();
+                    does_exist_apps.insert(id);
                 } else {
                     has_died.insert(id);
                 }
-            } else {
+            }
+            ContentType::Process => {
+                if let Ok(pid) = id.parse::<u32>() {
+                    if orphan_pids.contains(&pid) {
+                        if let Some(process) = process_map.get(&pid) {
+                            set_stats(&row_model, &process.usage_stats);
+                            row_model.children().remove_all();
+                        }
+                        does_exist_orphans.insert(pid);
+                    } else {
+                        has_died.insert(id);
+                    }
+                } else {
+                    has_died.insert(id);
+                }
+            }
+            _ => {
                 has_died.insert(id);
             }
-        } else {
-            has_died.insert(id);
         }
     });
 
     list.retain(|object| {
         object
             .downcast_ref::<RowModel>()
-            .map(|rm| !has_died.contains(&rm.id().to_string()))
+            .map(|rm| rm.is_flat() && !has_died.contains(&rm.id().to_string()))
             .unwrap_or(false)
     });
 
@@ -581,8 +588,9 @@ pub fn update_apps_flat(
             .content_type(ContentType::App)
             .section_type(SectionType::FirstSection)
             .light_cached_icon(LightCachedIcon::AppCachedKey(app.id.clone(), 24))
-            .id(&format!("flat-app-{}", app.id))
+            .id(&app.id)
             .name(&app.name)
+            .is_flat(true)
             .build();
         list.append(&row_model);
         set_stats(&row_model, stats);
@@ -634,12 +642,13 @@ pub fn update_apps_flat(
         let command_line = process.cmd.join(" ");
 
         let row_model = RowModelBuilder::new()
-            .content_type(ContentType::App)
+            .content_type(ContentType::Process)
             .section_type(SectionType::FirstSection)
-            .id(&format!("flat-{}", pid))
+            .id(&pid.to_string())
             .pid(pid)
             .name(pretty_name)
             .command_line(&command_line)
+            .is_flat(true)
             .build();
         list.append(&row_model);
         set_stats(&row_model, &process.usage_stats);
